@@ -30,30 +30,19 @@
                                      +---------------------------------+
 
 # Installation
-
-Bash
-
 git clone https://github.com/yujin0410/EmpathicAI.git
 cd EmpathicAI
+
 필요 라이브러리 설치:
-
-Bash
-
 pip install -r requirements.txt
 
 Python 3.8
 # How to Run
 1. Data Preparation
 IEMOCAP 데이터셋에서 대화 쌍을 생성한다. 
-
-Bash
-
 python scripts/create_dialogue_pairs.py --data_path path/to/IEMOCAP --output_path ./data
-2. 모델 학습 (Training)
-준비된 데이터를 사용하여 모델 학습을 시작합니다.
 
-Bash
-
+3. 모델 학습 (Training)
 python run.py \
     --data_path ./data/dialogue_pairs.pkl \
     --feature_path path/to/features \
