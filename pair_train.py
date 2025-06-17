@@ -40,47 +40,73 @@ def load_iemocap_metadata():
     print(f"총 {len(all_utterances)}개의 발화 메타데이터를 로드했습니다.")
     return all_utterances
 
+# pair_train.py 파일의 이 클래스 전체를 교체하세요.
+
 class IEMOCAP_4Modal_Dataset(Dataset):
     def __init__(self, preprocessed_feature_path, landmark_dir, mode='train'):
         self.landmark_dir = landmark_dir
         self.mode = mode
-        print(f"[{self.mode.upper()}] 전처리된 3모달 특징 파일 로딩: {preprocessed_feature_path}")
-        with open(preprocessed_feature_path, 'rb') as f: data_list = pk.load(f)
+        
+        print(f"[{self.mode.upper()}] 특징 및 메타데이터 로딩 시작...")
+        # 1. 모든 특징 및 메타데이터를 먼저 로드합니다.
+        with open(preprocessed_feature_path, 'rb') as f:
+            data_list = pk.load(f)
         self.feature_text = data_list[3]
         self.feature_audio = data_list[4]
         self.feature_visual = data_list[5]
         train_vids, test_vids, video_ids_dict = data_list[6], data_list[7], data_list[0]
+        all_utterances_meta = load_iemocap_metadata()
+        utterance_meta_dict = {u['id']: u for u in all_utterances_meta}
+
+        # 2. 모든 (F->M) 대화 쌍을 생성합니다. (train/test 구분 없이)
+        all_dyadic_pairs = self._create_all_dyadic_pairs(all_utterances_meta)
+        
+        # 3. 생성된 쌍들을 train/test로 분배합니다.
         train_uids = {uid for vid in train_vids for uid in video_ids_dict.get(vid, [])}
         test_uids = {uid for vid in test_vids for uid in video_ids_dict.get(vid, [])}
-        self.target_ids = train_uids if mode == 'train' else test_uids
-        all_utterances = load_iemocap_metadata()
-        self.samples = self.create_dyadic_pairs(all_utterances)
-        if not self.samples: print(f"[{self.mode.upper()}] 생성된 대화 쌍이 없습니다.")
+        
+        target_uids = train_uids if mode == 'train' else test_uids
+        
+        # 여성 발화(입력)의 ID가 해당 모드의 ID 집합에 속하는 쌍들만 최종 샘플로 사용
+        self.samples = [pair for pair in all_dyadic_pairs if pair[0]['id'] in target_uids]
+        
+        if not self.samples:
+            print(f"[{self.mode.upper()}] 생성된 대화 쌍이 없습니다.")
+        else:
+            print(f"[{self.mode.upper()}] 총 {len(self.samples)}개의 (F->M) 대화 쌍을 사용합니다.")
 
-    def create_dyadic_pairs(self, all_utterances):
-        dyadic_pairs = []
-        filtered_utterances = [u for u in all_utterances if u['id'] in self.target_ids]
-        utterance_dict = {u['id']: u for u in filtered_utterances}
-        sorted_ids = sorted(utterance_dict.keys())
-        for i in range(len(sorted_ids) - 1):
-            current_id, next_id = sorted_ids[i], sorted_ids[i+1]
-            if '_'.join(current_id.split('_')[:-1]) != '_'.join(next_id.split('_')[:-1]): continue
-            if current_id.split('_')[-1].startswith('F') and utterance_dict.get(next_id, {}).get('id', ' ').split('_')[-1].startswith('M'):
-                dyadic_pairs.append((utterance_dict[current_id], utterance_dict[next_id]))
-        print(f"총 {len(dyadic_pairs)}개의 (F->M) {self.mode} 대화 쌍을 찾았습니다.")
-        return dyadic_pairs
+    def _create_all_dyadic_pairs(self, all_utterances):
+        dialogues = defaultdict(list)
+        for u in all_utterances:
+            video_id = '_'.join(u['id'].split('_')[:-1])
+            dialogues[video_id].append(u)
+
+        all_pairs = []
+        for video_id in sorted(dialogues.keys()):
+            sorted_utterances = sorted(dialogues[video_id], key=lambda x: x['id'])
+            for i in range(len(sorted_utterances) - 1):
+                current_utterance = sorted_utterances[i]
+                next_utterance = sorted_utterances[i+1]
+                is_current_female = current_utterance['id'].split('_')[-1].startswith('F')
+                is_next_male = next_utterance['id'].split('_')[-1].startswith('M')
+                if is_current_female and is_next_male:
+                    all_pairs.append((current_utterance, next_utterance))
+        return all_pairs
 
     def __getitem__(self, index):
         f_utterance_data, m_utterance_data = self.samples[index]
-        f_features = {'text': self.load_feature(f_utterance_data['id'], 'text'),
-                      'audio': self.load_feature(f_utterance_data['id'], 'audio'),
-                      'face': self.load_feature(f_utterance_data['id'], 'face'),
-                      'landmark': self.load_feature(f_utterance_data['id'], 'landmark')}
-        m_emotion_label = m_utterance_data['emotion_label']
+        f_features = {
+            'text': self.load_feature(f_utterance_data['id'], 'text'),
+            'audio': self.load_feature(f_utterance_data['id'], 'audio'),
+            'face': self.load_feature(f_utterance_data['id'], 'face'),
+            'landmark': self.load_feature(f_utterance_data['id'], 'landmark')
+        }
+        m_emotion_label = m_utterance_data.get('emotion_label', -1) # 레이블이 없는 경우 대비
         m_landmark_feature = self.load_feature(m_utterance_data['id'], 'landmark')
         return f_features, (torch.tensor(m_emotion_label, dtype=torch.long), m_landmark_feature)
 
-    def __len__(self): return len(self.samples)
+    def __len__(self):
+        return len(self.samples)
 
     def load_feature(self, utterance_id, modality):
         try:
@@ -97,7 +123,6 @@ class IEMOCAP_4Modal_Dataset(Dataset):
         except (KeyError, FileNotFoundError):
             dims = {'text': 1024, 'audio': 342, 'face': 1582, 'landmark': 1434}
             return torch.zeros(dims.get(modality, 1))
-
 def evaluate_model(model, test_loader, device, criterion_emotion, criterion_landmark):
     model.eval()
     all_emo_preds, all_emo_labels = [], []
@@ -170,7 +195,7 @@ if __name__ == '__main__':
         criterion_emotion = nn.CrossEntropyLoss()
         criterion_landmark = nn.MSELoss()
         num_epochs = 50
-        landmark_loss_weight = 0.5
+        landmark_loss_weight = 100.0
 
         model.train()
         for epoch in range(num_epochs):
